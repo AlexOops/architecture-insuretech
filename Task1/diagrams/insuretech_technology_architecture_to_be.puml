@@ -1,0 +1,154 @@
+@startuml
+!theme plain
+
+left to right direction
+
+skinparam shadowing false
+skinparam roundcorner 12
+skinparam linetype ortho
+skinparam defaultTextAlignment center
+skinparam packageStyle rectangle
+
+skinparam rectangle {
+  BackgroundColor #EEF4FF
+  BorderColor #5B8DEF
+  FontColor #1F2937
+}
+
+skinparam database {
+  BackgroundColor #E8F7FF
+  BorderColor #2780E3
+  FontColor #1F2937
+}
+
+skinparam note {
+  BackgroundColor #FFF8DC
+  BorderColor #C9A227
+}
+
+actor "Частный клиент" as privateUser
+actor "B2B-партнёр" as partner
+
+cloud "Public DNS" as dns
+cloud "CDN\nStatic SPA / JS / CSS / images\nEdge delivery across RF" as cdn
+rectangle "WAF / DDoS Protection" as waf
+rectangle "API Gateway\n- JWT / OAuth2\n- Rate limit: 20 RPS per partner\n- Quotas\n- Health check: /healthz" as apiGw
+rectangle "Application Load Balancer\nHealth check: GET /ready" as alb
+
+privateUser --> dns : HTTPS
+dns --> cdn : static content
+dns --> waf : dynamic requests
+partner --> apiGw : HTTPS / REST
+apiGw --> waf
+waf --> alb
+
+frame "Yandex Cloud / Region" as region {
+  frame "Managed Object Storage" as objectStorage {
+    rectangle "Frontend static assets\nSPA build\nImages / documents" as staticAssets
+    rectangle "Backups + WAL archive" as backupStorage
+  }
+
+  frame "Managed Kubernetes Cluster (regional)" as k8s {
+    rectangle "Regional control plane" as controlPlane
+
+    frame "AZ-a" as azA {
+      rectangle "Node group A" as nodeA
+      rectangle "Ingress / NGINX\nReadiness: /ready\nLiveness: /live" as ingressA
+      rectangle "App replicas\ncore-app\nclient-info\nins-product-aggregator\nins-comp-settlement\nWeb / BFF\nHPA enabled" as appA
+    }
+
+    frame "AZ-b" as azB {
+      rectangle "Node group B" as nodeB
+      rectangle "Ingress / NGINX\nReadiness: /ready\nLiveness: /live" as ingressB
+      rectangle "App replicas\ncore-app\nclient-info\nins-product-aggregator\nins-comp-settlement\nWeb / BFF\nHPA enabled" as appB
+    }
+
+    frame "AZ-c" as azC {
+      rectangle "Node group C" as nodeC
+      rectangle "Ingress / NGINX\nReadiness: /ready\nLiveness: /live" as ingressC
+      rectangle "App replicas\ncore-app\nclient-info\nins-product-aggregator\nins-comp-settlement\nWeb / BFF\nHPA enabled" as appC
+    }
+
+    rectangle "Cluster Autoscaler\nPodDisruptionBudgets\nAnti-affinity / topology spread" as autoscaling
+  }
+
+  frame "PostgreSQL HA Cluster" as pgCluster {
+    database "PostgreSQL Primary\nAZ-a" as pgPrimary
+    database "PostgreSQL Sync Standby\nAZ-b" as pgSync
+    database "PostgreSQL Async Replica\nAZ-c" as pgAsync
+    rectangle "Patroni / automatic failover\nDB health check: pg_isready" as patroni
+  }
+}
+
+cdn --> staticAssets : GET static content
+alb --> ingressA : traffic + HC /ready
+alb --> ingressB : traffic + HC /ready
+alb --> ingressC : traffic + HC /ready
+
+ingressA --> appA
+ingressB --> appB
+ingressC --> appC
+
+appA --> pgPrimary : read / write
+appB --> pgPrimary : read / write
+appC --> pgPrimary : read / write
+
+pgPrimary --> pgSync : synchronous replication
+pgPrimary --> pgAsync : asynchronous replication
+pgPrimary --> backupStorage : base backup
+pgPrimary --> backupStorage : WAL archive
+patroni --> pgPrimary
+patroni --> pgSync
+patroni --> pgAsync
+
+note right of k8s
+Выбран один региональный cluster,
+растянутый на 3 зоны доступности.
+
+Причины:
+- меньше operational complexity;
+- единая control plane;
+- проще rollout / observability;
+- достаточно для текущего масштаба;
+- обеспечивает HA на уровне AZ.
+end note
+
+note bottom of alb
+Health checks:
+- ALB -> Ingress: GET /ready
+- Kubernetes: readiness / liveness probes
+- unhealthy pods and nodes are excluded from routing
+end note
+
+note bottom of apiGw
+B2B traffic изолирован через API Gateway:
+- rate limit / quotas;
+- auth;
+- защита SLA;
+- один партнёр не может "съесть" весь backend.
+end note
+
+note bottom of pgCluster
+DB strategy:
+- Primary + Sync Standby + Async Replica
+- automatic failover
+- backups + WAL archiving + PITR
+
+RTO <= 45 min
+RPO <= 15 min
+end note
+
+note bottom of objectStorage
+Static content is served via CDN,
+so page load time does not depend
+on the user's geographic location.
+end note
+
+note bottom of region
+Sharding is NOT used:
+- total data volume is only 50 GB;
+- vertical scaling + replicas are enough;
+- sharding would add unnecessary complexity.
+end note
+
+@enduml
