@@ -1,0 +1,107 @@
+"""
+GraphQL schema для сервиса client-info.
+
+Цель:
+- заменить набор REST endpoints гибким GraphQL API;
+- позволить потребителям выбирать только нужные поля клиента;
+- уменьшить количество запросов к client-info в сценариях core-app и web app.
+"""
+
+schema {
+  query: Query
+}
+
+"""
+Дата в формате ISO-8601.
+Например: 2026-06-20
+"""
+scalar Date
+
+type Query {
+  """
+  Получить карточку клиента по ID.
+
+  Эквивалент REST:
+  GET /clients/{id}
+
+  Через вложенные поля можно также получить документы и родственников клиента
+  без дополнительных HTTP-запросов.
+  """
+  client(id: ID!): Client
+
+  """
+  Получить список документов клиента по ID.
+
+  Эквивалент REST:
+  GET /clients/{id}/documents
+
+  Этот запрос оставлен для сценариев, где потребителю нужны только документы,
+  без основной карточки клиента.
+  """
+  clientDocuments(clientId: ID!): [Document!]!
+
+  """
+  Получить список родственников клиента по ID.
+
+  Эквивалент REST:
+  GET /clients/{id}/relatives
+
+  Этот запрос оставлен для сценариев, где потребителю нужны только родственники,
+  без основной карточки клиента.
+  """
+  clientRelatives(clientId: ID!): [Relative!]!
+}
+
+"""
+Клиент.
+
+В REST-контракте Client содержит:
+- id
+- name
+- age
+
+В GraphQL к нему добавлены связи documents и relatives,
+чтобы потребитель мог получить нужный набор данных одним запросом.
+"""
+type Client {
+  id: ID!
+  name: String!
+  age: Int
+
+  """
+  Документы клиента.
+
+  Позволяет заменить отдельный REST-запрос:
+  GET /clients/{id}/documents
+  """
+  documents: [Document!]!
+
+  """
+  Родственники клиента.
+
+  Позволяет заменить отдельный REST-запрос:
+  GET /clients/{id}/relatives
+  """
+  relatives: [Relative!]!
+}
+
+"""
+Документ клиента.
+"""
+type Document {
+  id: ID!
+  type: String!
+  number: String!
+  issueDate: Date
+  expiryDate: Date
+}
+
+"""
+Родственник клиента.
+"""
+type Relative {
+  id: ID!
+  relationType: String!
+  name: String!
+  age: Int
+}

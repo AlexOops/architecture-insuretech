@@ -1,0 +1,80 @@
+# Получить только базовые данные клиента.
+# Заменяет REST:
+# GET /clients/{id}
+
+query GetClientBaseInfo {
+  client(id: "client-123") {
+    id
+    name
+    age
+  }
+}
+
+# Получить клиента и только номера документов.
+# Вместо двух REST-запросов:
+# GET /clients/{id}
+# GET /clients/{id}/documents
+
+query GetClientWithDocuments {
+  client(id: "client-123") {
+    id
+    name
+    documents {
+      id
+      type
+      number
+      expiryDate
+    }
+  }
+}
+
+# Получить клиента, документы и родственников одним запросом.
+# Вместо трёх REST-запросов:
+# GET /clients/{id}
+# GET /clients/{id}/documents
+# GET /clients/{id}/relatives
+
+query GetClientFullCard {
+  client(id: "client-123") {
+    id
+    name
+    age
+    documents {
+      id
+      type
+      number
+      issueDate
+      expiryDate
+    }
+    relatives {
+      id
+      relationType
+      name
+      age
+    }
+  }
+}
+
+# Получить только документы клиента,
+# если основная карточка клиента не нужна.
+
+query GetClientDocumentsOnly {
+  clientDocuments(clientId: "client-123") {
+    id
+    type
+    number
+    expiryDate
+  }
+}
+
+# Получить только родственников клиента,
+# если основная карточка клиента не нужна.
+
+query GetClientRelativesOnly {
+  clientRelatives(clientId: "client-123") {
+    id
+    relationType
+    name
+    age
+  }
+}
