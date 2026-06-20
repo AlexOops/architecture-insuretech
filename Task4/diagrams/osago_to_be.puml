@@ -1,0 +1,191 @@
+@startuml
+
+left to right direction
+
+skinparam shadowing false
+skinparam roundcorner 12
+skinparam linetype ortho
+skinparam defaultTextAlignment center
+skinparam packageStyle rectangle
+
+skinparam rectangle {
+  BackgroundColor #DDF4FF
+  BorderColor #2B7BBB
+  FontColor #1F2937
+}
+
+skinparam database {
+  BackgroundColor #E8F7FF
+  BorderColor #2780E3
+  FontColor #1F2937
+}
+
+skinparam queue {
+  BackgroundColor #FFF2CC
+  BorderColor #D6A100
+  FontColor #1F2937
+}
+
+skinparam note {
+  BackgroundColor #FFF8DC
+  BorderColor #C9A227
+}
+
+actor "Пользователь" as user
+
+rectangle "Web App\nReact SPA" as web
+
+rectangle "API Gateway / Ingress\n\nRate Limiter\nTimeout" as gateway
+
+rectangle "core-app\n\nОтветственность:\n- оформление ОСАГО\n- создание quote session\n- хранение read model предложений\n- REST API для Web\n- SSE stream для Web" as core
+
+database "core-db\nPostgreSQL\n\n- osago_quote_requests\n- osago_offers_read_model\n- outbox\n- inbox" as coreDb
+
+queue "Kafka / Event Streaming Platform" as kafka {
+  queue "topic:\nosago-quote-requests.v1\n\nOsagoQuoteRequested" as quoteRequests
+
+  queue "topic:\nosago-offers.v1\n\nOsagoOfferReceived\nOsagoCompanyTimedOut\nOsagoQuoteCompleted\nOsagoQuoteFailed" as offerEvents
+
+  queue "topic:\nosago-offers.dlq.v1" as osagoDlq
+
+  rectangle "Schema Registry\nEvent contracts" as schemaRegistry
+}
+
+rectangle "osago-aggregator\n\nОтветственность:\n- отправка заявок в страховые\n- polling решений\n- timeout 60 sec\n- публикация предложений" as osago
+
+database "osago-aggregator-db\nPostgreSQL\n\n- quote_request_id\n- insurance_company_id\n- external_application_id\n- status\n- retry_count\n- next_poll_at\n- deadline_at\n- offer payload\n- outbox\n- inbox" as osagoDb
+
+rectangle "Outbox relay\ncore-app" as coreOutboxRelay
+rectangle "Outbox relay\nosago-aggregator" as osagoOutboxRelay
+
+cloud "Страховые компании\nREST API\n\n1. create OSAGO application\n2. get offer by application id" as insurers {
+  rectangle "Insurance A" as insA
+  rectangle "Insurance B" as insB
+  rectangle "Insurance C" as insC
+  rectangle "Insurance D" as insD
+  rectangle "Insurance E" as insE
+  rectangle "Insurance F..J\nplanned" as insRest
+}
+
+rectangle "Resilience policy\nper insurance company\n\nRate Limiter\nCircuit Breaker\nRetry with backoff\nTimeout\nDeadline: 60 sec" as resilience
+
+user --> web : Заполняет заявку ОСАГО
+web --> gateway : HTTPS
+
+gateway --> core : REST\nPOST /api/osago/quotes\n<<Rate Limiter + Timeout>>
+core --> coreDb : create quote session\nwrite outbox event
+core --> web : 202 Accepted\nquoteRequestId
+
+web --> gateway : SSE\nGET /api/osago/quotes/{id}/events
+gateway --> core : SSE stream\n<<Timeout 65 sec + reconnect>>
+
+coreDb --> coreOutboxRelay : read outbox
+coreOutboxRelay --> quoteRequests : publish OsagoQuoteRequested\n<<Retry>>
+
+quoteRequests --> osago : consume quote request\nidempotent consumer
+osago --> osagoDb : create per-company jobs\nstore inbox event_id
+
+osago --> resilience : execute company jobs
+
+resilience --> insA : REST create + poll\n<<Rate Limiter + Circuit Breaker + Retry + Timeout>>
+resilience --> insB : REST create + poll\n<<Rate Limiter + Circuit Breaker + Retry + Timeout>>
+resilience --> insC : REST create + poll\n<<Rate Limiter + Circuit Breaker + Retry + Timeout>>
+resilience --> insD : REST create + poll\n<<Rate Limiter + Circuit Breaker + Retry + Timeout>>
+resilience --> insE : REST create + poll\n<<Rate Limiter + Circuit Breaker + Retry + Timeout>>
+resilience --> insRest : REST create + poll\n<<Rate Limiter + Circuit Breaker + Retry + Timeout>>
+
+resilience --> osago : offer / timeout / error
+osago --> osagoDb : update company status\nwrite outbox event
+
+osagoDb --> osagoOutboxRelay : read outbox
+osagoOutboxRelay --> offerEvents : publish offer/status event\n<<Retry>>
+
+offerEvents --> core : consume offer/status event
+core --> coreDb : update offer read model\nstore inbox event_id
+core --> web : SSE event\nshow offer immediately
+
+coreOutboxRelay --> osagoDlq : failed publish / poison message
+osagoOutboxRelay --> osagoDlq : failed publish / poison message
+core --> osagoDlq : failed consume
+osago --> osagoDlq : failed consume
+
+schemaRegistry --> quoteRequests : validate command schema
+schemaRegistry --> offerEvents : validate event schema
+
+note top of core
+API для Web:
+
+1. REST:
+POST /api/osago/quotes
+
+Возвращает quoteRequestId сразу,
+не ждёт ответы страховых компаний.
+
+2. SSE:
+GET /api/osago/quotes/{quoteRequestId}/events
+
+Отдаёт предложения по мере получения.
+end note
+
+note bottom of osago
+osago-aggregator имеет своё хранилище.
+
+Причины:
+- процесс длится до 60 секунд;
+- сервис работает в нескольких репликах;
+- pod может перезапуститься;
+- нужно хранить external_application_id;
+- нужны retries, statuses, deadlines.
+end note
+
+note bottom of kafka
+Интеграция core-app и osago-aggregator
+асинхронная через Kafka.
+
+Это убирает длинный синхронный REST-вызов
+и позволяет масштабировать сервисы независимо.
+end note
+
+note right of resilience
+Паттерны отказоустойчивости
+применяются отдельно
+для каждой страховой компании.
+
+Если одна страховая недоступна,
+остальные предложения продолжают приходить.
+end note
+
+note bottom of coreDb
+Transactional Outbox:
+
+quote session и событие
+OsagoQuoteRequested
+записываются в одной транзакции.
+end note
+
+note bottom of osagoDb
+Transactional Outbox:
+
+полученное предложение или timeout
+и событие для core-app
+записываются в одной транзакции.
+end note
+
+note bottom of offerEvents
+События предложений приходят
+по мере готовности.
+
+core-app обновляет read model
+и отправляет событие пользователю через SSE.
+end note
+
+legend right
+|= Обозначение |= Паттерн |
+| <<Rate Limiter>> | ограничение частоты запросов |
+| <<Circuit Breaker>> | временное отключение проблемной интеграции |
+| <<Retry>> | повторная попытка с backoff |
+| <<Timeout>> | ограничение времени ожидания |
+| Deadline 60 sec | общий лимит ожидания страховой |
+endlegend
+
+@enduml
