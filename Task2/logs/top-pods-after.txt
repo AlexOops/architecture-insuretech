@@ -1,0 +1,2 @@
+NAME                            CPU(cores)   MEMORY(bytes)   
+scaletestapp-6c67d479c4-zvpwj   18m          13Mi            
