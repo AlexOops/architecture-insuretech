@@ -1,0 +1,168 @@
+@startuml
+
+left to right direction
+
+skinparam shadowing false
+skinparam roundcorner 12
+skinparam linetype ortho
+skinparam defaultTextAlignment center
+skinparam packageStyle rectangle
+
+skinparam rectangle {
+  BackgroundColor #DDF4FF
+  BorderColor #2B7BBB
+  FontColor #1F2937
+}
+
+skinparam database {
+  BackgroundColor #E8F7FF
+  BorderColor #2780E3
+  FontColor #1F2937
+}
+
+skinparam queue {
+  BackgroundColor #FFF2CC
+  BorderColor #D6A100
+  FontColor #1F2937
+}
+
+skinparam note {
+  BackgroundColor #FFF8DC
+  BorderColor #C9A227
+}
+
+actor "Клиент" as client
+actor "B2B-партнёр" as partner
+
+rectangle "InsureTech Web\n[JavaScript, React]" as web
+rectangle "core-app\n[Kotlin, Spring Boot]\n\n- оформление страховок\n- отображение продуктов\n- локальная read model продуктов\n- публикация policy events" as core
+rectangle "client-info\nKotlin / Spring Boot\n\nКлиентские данные" as clientInfo
+rectangle "ins-product-aggregator\nKotlin / Spring Boot\n\n- интеграция со страховыми\n- нормализация продуктов\n- публикация product events" as productAgg
+rectangle "ins-comp-settlement\nKotlin / Spring Boot\n\n- взаиморасчёты\n- локальная read model продуктов\n- потребление policy events" as settlement
+
+database "core-db\nPostgreSQL\n\n- policies\n- product_read_model\n- outbox\n- inbox" as coreDb
+database "client-info-db\nPostgreSQL\n\n- clients\n- documents\n- contacts" as clientDb
+database "product-catalog-db\nPostgreSQL\n\n- products\n- tariffs\n- outbox\n- sync status" as productDb
+database "settlement-db\nPostgreSQL\n\n- settlement registry\n- product_read_model\n- consumed policies\n- inbox" as settlementDb
+
+queue "Kafka / Event Streaming Platform" as kafka {
+  queue "topic:\ninsurance-products.v1\n\nProductCatalogUpdated\nProductTariffUpdated\nProductDisabled" as topicProducts
+
+  queue "topic:\npolicies.v1\n\nPolicyCreated\nPolicyUpdated\nPolicyCancelled\nPolicyIssued" as topicPolicies
+
+  queue "DLQ topics\n\ninsurance-products.dlq.v1\npolicies.dlq.v1" as dlq
+
+  rectangle "Schema Registry\nEvent contracts" as schemaRegistry
+}
+
+rectangle "Outbox relay\nfor core-app" as coreOutboxRelay
+rectangle "Outbox relay\nfor product aggregator" as productOutboxRelay
+
+cloud "Страховые компании\n5 сейчас + 5 планируется\nREST / SOAP / GraphQL" as insurers
+
+client --> web : HTTPS
+partner --> core : REST API
+
+web --> core : REST
+core --> clientInfo : REST\nclient data
+clientInfo --> clientDb : TCP
+
+core --> coreDb : write policies\nread local products
+settlement --> settlementDb : settlement data\nlocal products
+productAgg --> productDb : save products/tariffs\nwrite outbox
+
+productAgg --> insurers : integration sync\nwith retries/timeouts
+
+coreDb --> coreOutboxRelay : read outbox
+coreOutboxRelay --> topicPolicies : publish policy events
+
+productDb --> productOutboxRelay : read outbox
+productOutboxRelay --> topicProducts : publish product events
+
+topicProducts --> core : consume product events
+topicProducts --> settlement : consume product events
+
+topicPolicies --> settlement : consume policy events
+
+core --> coreDb : update product_read_model\nstore inbox event_id
+settlement --> settlementDb : update product_read_model\nstore policies\nstore inbox event_id
+
+coreOutboxRelay --> dlq : failed publish / poison event
+productOutboxRelay --> dlq : failed publish / poison event
+core --> dlq : failed consume
+settlement --> dlq : failed consume
+
+schemaRegistry --> topicProducts : schema validation
+schemaRegistry --> topicPolicies : schema validation
+
+note top of productAgg
+ins-product-aggregator больше не является
+синхронным источником данных для core-app
+и settlement.
+
+Он обновляет каталог и публикует события.
+end note
+
+note bottom of core
+core-app больше не опрашивает
+ins-product-aggregator каждые 15 минут.
+
+Локальная копия продуктов обновляется
+через события insurance-products.v1.
+end note
+
+note bottom of settlement
+ins-comp-settlement больше не делает
+ночной REST-запрос в core-app
+за всеми оформленными страховками.
+
+Реестр взаиморасчётов строится
+из policy events.
+end note
+
+note right of kafka
+Event Streaming решает проблемы:
+- убирает polling;
+- снижает связанность;
+- добавляет backpressure;
+- позволяет retry и DLQ;
+- упрощает подключение новых страховых.
+end note
+
+note bottom of coreDb
+Transactional Outbox:
+
+policy и outbox event записываются
+в одной транзакции.
+
+Это защищает от ситуации,
+когда данные записались,
+а событие не отправилось.
+end note
+
+note bottom of productDb
+Transactional Outbox:
+
+обновление каталога и product event
+записываются атомарно.
+
+Потребители получают изменения
+через Kafka.
+end note
+
+note bottom of settlementDb
+Inbox / Idempotent Consumer:
+
+каждый event_id сохраняется,
+повторная доставка не приводит
+к повторной обработке.
+end note
+
+note bottom of insurers
+Внешние API страховых остаются
+синхронными интеграциями,
+но их задержки больше не блокируют
+внутренние запросы core-app/settlement.
+end note
+
+@enduml

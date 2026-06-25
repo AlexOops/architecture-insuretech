@@ -1,0 +1,15 @@
+=== HPA ===
+NAME               REFERENCE                 TARGETS           MINPODS   MAXPODS   REPLICAS   AGE
+scaletestapp-hpa   Deployment/scaletestapp   memory: 64%/80%   1         10        1          17m
+
+=== DEPLOYMENT ===
+NAME           READY   UP-TO-DATE   AVAILABLE   AGE
+scaletestapp   1/1     1            1           17m
+
+=== PODS ===
+NAME                            READY   STATUS    RESTARTS   AGE   IP           NODE       NOMINATED NODE   READINESS GATES
+scaletestapp-6c67d479c4-zvpwj   1/1     Running   0          17m   10.244.0.4   minikube   <none>           <none>
+
+=== TOP PODS ===
+NAME                            CPU(cores)   MEMORY(bytes)   
+scaletestapp-6c67d479c4-zvpwj   18m          12Mi            
